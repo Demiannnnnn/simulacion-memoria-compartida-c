@@ -1,0 +1,21 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compilar
+        run: make all CFLAGS="-std=gnu11 -Wall -Wextra -Werror -O2"
+      - name: Pruebas unitarias
+        run: make test
+      - name: Prueba de humo (3 s con SIGINT)
+        run: |
+          cd "$RUNNER_TEMP"
+          timeout -s INT 3 "$GITHUB_WORKSPACE/main" x10 > salida.txt || test $? -eq 124
+          grep -q "Simulación terminada exitosamente" salida.txt
+          grep -q "REPORTE DIARIO" reporte_diario.txt
