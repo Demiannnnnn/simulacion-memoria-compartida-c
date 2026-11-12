@@ -48,7 +48,7 @@ El programa acepta un parámetro opcional con el factor de aceleración de tiemp
 ./main x10
 ```
 
-Para detener la simulación de forma ordenada, envía una señal de interrupción presionando `Ctrl+C` (`SIGINT`). El sistema completará la jornada y generará el archivo `reporte_diario.txt`.
+Para detener la simulación de forma ordenada, envía una señal de interrupción presionando `Ctrl+C` (`SIGINT`). La simulación termina y genera el archivo `reporte_diario.txt`.
 
 ## Cómo correr las pruebas
 
