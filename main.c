@@ -136,6 +136,28 @@ int total_no_contabilizados = 0;
 
 pthread_mutex_t stats_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t print_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t medicos_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+// Snapshot de estadísticas compartidas
+typedef struct {
+    int generados;
+    int clasificados;
+    int atendidos;
+    int abandonaron;
+    int no_contabilizados;
+} EstadisticasSnapshot;
+
+EstadisticasSnapshot obtener_estadisticas(void) {
+    EstadisticasSnapshot snap;
+    pthread_mutex_lock(&stats_mutex);
+    snap.generados = total_pacientes_generados;
+    snap.clasificados = total_pacientes_clasificados;
+    snap.atendidos = total_pacientes_atendidos;
+    snap.abandonaron = total_pacientes_abandonaron;
+    snap.no_contabilizados = total_no_contabilizados;
+    pthread_mutex_unlock(&stats_mutex);
+    return snap;
+}
 
 volatile int simulacion_activa = 1;
 time_t tiempo_inicio_simulacion;
@@ -164,6 +186,14 @@ void init_cola(Cola *cola) {
     cola->count = 0;
     pthread_mutex_init(&cola->mutex, NULL);
     pthread_cond_init(&cola->cond, NULL);
+}
+
+// Obtener tamaño actual de la cola protegido por su mutex
+int cola_tamano(Cola *cola) {
+    pthread_mutex_lock(&cola->mutex);
+    int c = cola->count;
+    pthread_mutex_unlock(&cola->mutex);
+    return c;
 }
 
 void enqueue(Cola *cola, Paciente paciente) {
@@ -429,7 +459,9 @@ void* medico_atencion(void* arg) {
             continue;
         }
         
+        pthread_mutex_lock(&medicos_mutex);
         medico->ocupado = 1;
+        pthread_mutex_unlock(&medicos_mutex);
         paciente.tiempo_atencion = time(NULL);
         
         pthread_mutex_lock(&print_mutex);
@@ -442,7 +474,9 @@ void* medico_atencion(void* arg) {
         
         if (!simulacion_activa) break;
         
+        pthread_mutex_lock(&medicos_mutex);
         medico->pacientes_atendidos++;
+        pthread_mutex_unlock(&medicos_mutex);
         paciente.atendido = 1;
         
         pthread_mutex_lock(&stats_mutex);
@@ -453,7 +487,9 @@ void* medico_atencion(void* arg) {
         printf("✅ %s %d terminó de atender paciente %d\n", tipo_str, medico->id, paciente.id);
         pthread_mutex_unlock(&print_mutex);
         
+        pthread_mutex_lock(&medicos_mutex);
         medico->ocupado = 0;
+        pthread_mutex_unlock(&medicos_mutex);
         
         // Pausa entre pacientes: 1-2 minutos (60-120 segundos)
         int tiempo_pausa = rand() % 61 + 60; // 60-120 segundos (1-2 min)
@@ -476,7 +512,7 @@ void* gestor_personal(void* arg) {
         if (ahora - ultimo_cambio_personal < 120 / SPEED_FACTOR) continue; // Mín 2 min de simulación (120/SPEED_FACTOR s reales) entre cambios
         
         // Evaluar carga del sistema para cambiar personal administrativo
-        int carga_recepcion = cola_recepcion.count;
+        int carga_recepcion = cola_tamano(&cola_recepcion);
         
         pthread_mutex_lock(&admin_mutex);
         int activos_previos = admin_activos;
@@ -505,10 +541,11 @@ void* gestor_personal(void* arg) {
         }
         
         // Detectar colapso del sistema
-        int total_esperando = cola_recepcion.count + cola_medico_general.count + 
-                             cola_enfermeria.count;
+        int total_esperando = cola_tamano(&cola_recepcion) + 
+                              cola_tamano(&cola_medico_general) + 
+                              cola_tamano(&cola_enfermeria);
         for (int i = 0; i < 4; i++) {
-            total_esperando += cola_especialista[i].count;
+            total_esperando += cola_tamano(&cola_especialista[i]);
         }
         
         if (total_esperando > 50) {
@@ -541,14 +578,16 @@ void* contador_tiempo(void* arg) {
         int minutos_sim = (tiempo_simulacion_transcurrido % 3600) / 60;
         int segundos_sim = tiempo_simulacion_transcurrido % 60;
         
+        EstadisticasSnapshot snap = obtener_estadisticas();
+
         pthread_mutex_lock(&print_mutex);
         printf("\n⏰ TIEMPO TRANSCURRIDO:\n");
         printf("   Real: %02d:%02d:%02d | Simulación: %02d:%02d:%02d (x%d)\n", 
                horas_real, minutos_real, segundos_real,
                horas_sim, minutos_sim, segundos_sim, SPEED_FACTOR);
         printf("   Pacientes: Gen=%d, Clas=%d, Atend=%d, Aband=%d\n\n", 
-               total_pacientes_generados, total_pacientes_clasificados,
-               total_pacientes_atendidos, total_pacientes_abandonaron);
+               snap.generados, snap.clasificados,
+               snap.atendidos, snap.abandonaron);
         pthread_mutex_unlock(&print_mutex);
     }
     
@@ -562,22 +601,31 @@ void* monitor_sistema(void* arg) {
         
         if (!simulacion_activa) break;
         
+        int rec_count = cola_tamano(&cola_recepcion);
+        int gen_count = cola_tamano(&cola_medico_general);
+        int enf_count = cola_tamano(&cola_enfermeria);
+        int esp_count[4];
+        for (int i = 0; i < 4; i++) {
+            esp_count[i] = cola_tamano(&cola_especialista[i]);
+        }
+        EstadisticasSnapshot snap = obtener_estadisticas();
+        int activos_mon = obtener_admin_activos();
+
         pthread_mutex_lock(&print_mutex);
         printf("\n=== ESTADO DEL SISTEMA ===\n");
-        printf("Pacientes en recepción: %d\n", cola_recepcion.count);
-        printf("Pacientes esperando médico general: %d\n", cola_medico_general.count);
-        printf("Pacientes esperando enfermería: %d\n", cola_enfermeria.count);
+        printf("Pacientes en recepción: %d\n", rec_count);
+        printf("Pacientes esperando médico general: %d\n", gen_count);
+        printf("Pacientes esperando enfermería: %d\n", enf_count);
         
         for (int i = 0; i < 4; i++) {
             const char* especialidades[] = {"Cardiología", "Neurología", "Pediatría", "Dermatología"};
-            printf("Pacientes esperando %s: %d\n", especialidades[i], cola_especialista[i].count);
+            printf("Pacientes esperando %s: %d\n", especialidades[i], esp_count[i]);
         }
         
         printf("Total generados: %d, Clasificados: %d, Atendidos: %d, Abandonaron: %d\n", 
-               total_pacientes_generados, total_pacientes_clasificados, 
-               total_pacientes_atendidos, total_pacientes_abandonaron);
+               snap.generados, snap.clasificados, 
+               snap.atendidos, snap.abandonaron);
         
-        int activos_mon = obtener_admin_activos();
         printf("Personal administrativo activos: %d/%d - ", activos_mon, num_admin);
         for (int i = 0; i < num_admin; i++) {
             if (i < activos_mon) {
@@ -593,9 +641,11 @@ void* monitor_sistema(void* arg) {
         
         printf("Médicos ocupados: ");
         int total_medicos = num_medicos_general + num_enfermeras + num_especialistas;
+        pthread_mutex_lock(&medicos_mutex);
         for (int i = 0; i < total_medicos; i++) {
             printf("%s%d", (i > 0) ? ", " : "", medicos[i].ocupado);
         }
+        pthread_mutex_unlock(&medicos_mutex);
         printf("\n");
         
         printf("========================\n\n");
@@ -626,26 +676,32 @@ void generar_reporte() {
             duracion_simulacion, duracion_simulacion/3600, (duracion_simulacion%3600)/60, duracion_simulacion%60);
     fprintf(archivo, "================================\n\n");
     
+    // Obtener snapshot de estadísticas compartidas bajo candado
+    EstadisticasSnapshot stats = obtener_estadisticas();
+
     fprintf(archivo, "RESUMEN GENERAL:\n");
-    fprintf(archivo, "- Pacientes generados: %d\n", total_pacientes_generados);
-    fprintf(archivo, "- Pacientes clasificados: %d\n", total_pacientes_clasificados);
-    fprintf(archivo, "- Pacientes atendidos: %d\n", total_pacientes_atendidos);
-    fprintf(archivo, "- Pacientes que abandonaron: %d\n", total_pacientes_abandonaron);
+    fprintf(archivo, "- Pacientes generados: %d\n", stats.generados);
+    fprintf(archivo, "- Pacientes clasificados: %d\n", stats.clasificados);
+    fprintf(archivo, "- Pacientes atendidos: %d\n", stats.atendidos);
+    fprintf(archivo, "- Pacientes que abandonaron: %d\n", stats.abandonaron);
     
     // Calcular no contabilizados (en recepción)
-    total_no_contabilizados = cola_recepcion.count;
-    fprintf(archivo, "- Pacientes no contabilizados (en recepción): %d\n", total_no_contabilizados);
+    int en_recepcion = cola_tamano(&cola_recepcion);
+    pthread_mutex_lock(&stats_mutex);
+    total_no_contabilizados = en_recepcion;
+    pthread_mutex_unlock(&stats_mutex);
+    fprintf(archivo, "- Pacientes no contabilizados (en recepción): %d\n", en_recepcion);
     
     // Pacientes sin atención (clasificados pero no atendidos)
-    int sin_atencion = (cola_medico_general.count + cola_enfermeria.count);
+    int sin_atencion = (cola_tamano(&cola_medico_general) + cola_tamano(&cola_enfermeria));
     for (int i = 0; i < 4; i++) {
-        sin_atencion += cola_especialista[i].count;
+        sin_atencion += cola_tamano(&cola_especialista[i]);
     }
     fprintf(archivo, "- Pacientes sin atención (clasificados, no atendidos): %d\n\n", sin_atencion);
     
     // Eficiencia del sistema
-    if (total_pacientes_generados > 0) {
-        float eficiencia = ((float)total_pacientes_atendidos / total_pacientes_generados) * 100;
+    if (stats.generados > 0) {
+        float eficiencia = ((float)stats.atendidos / stats.generados) * 100;
         fprintf(archivo, "- Eficiencia del sistema: %.2f%%\n\n", eficiencia);
     }
     
@@ -661,6 +717,7 @@ void generar_reporte() {
     }
     
     fprintf(archivo, "\nPERSONAL MÉDICO:\n");
+    pthread_mutex_lock(&medicos_mutex);
     for (int i = 0; i < num_medicos_general; i++) {
         fprintf(archivo, "- Médico General %d: %d pacientes atendidos\n", 
                 medicos[i].id, medicos[i].pacientes_atendidos);
@@ -678,13 +735,14 @@ void generar_reporte() {
         fprintf(archivo, "- Especialista %s %d: %d pacientes atendidos\n", 
                 especialidades[medicos[idx].especialidad], medicos[idx].id, medicos[idx].pacientes_atendidos);
     }
+    pthread_mutex_unlock(&medicos_mutex);
     
     fprintf(archivo, "\nCOLAS AL FINAL DE LA JORNADA:\n");
-    fprintf(archivo, "- En recepción: %d pacientes\n", cola_recepcion.count);
-    fprintf(archivo, "- Esperando médico general: %d pacientes\n", cola_medico_general.count);
-    fprintf(archivo, "- Esperando enfermería: %d pacientes\n", cola_enfermeria.count);
+    fprintf(archivo, "- En recepción: %d pacientes\n", cola_tamano(&cola_recepcion));
+    fprintf(archivo, "- Esperando médico general: %d pacientes\n", cola_tamano(&cola_medico_general));
+    fprintf(archivo, "- Esperando enfermería: %d pacientes\n", cola_tamano(&cola_enfermeria));
     for (int i = 0; i < 4; i++) {
-        fprintf(archivo, "- Esperando %s: %d pacientes\n", especialidades[i], cola_especialista[i].count);
+        fprintf(archivo, "- Esperando %s: %d pacientes\n", especialidades[i], cola_tamano(&cola_especialista[i]));
     }
     
     fclose(archivo);

@@ -213,6 +213,13 @@ static void test_calcular_nuevos_admin_activos(void) {
     CHECK(calcular_nuevos_admin_activos(15, 2) == 2);
 }
 
+static int obtener_clasificados_admin(PersonalAdmin *admin) {
+    pthread_mutex_lock(&admin_mutex);
+    int c = admin->pacientes_clasificados;
+    pthread_mutex_unlock(&admin_mutex);
+    return c;
+}
+
 static void test_admin_hilos_activos_vs_inactivos(void) {
     init_cola(&cola_recepcion);
     init_cola(&cola_medico_general);
@@ -240,15 +247,15 @@ static void test_admin_hilos_activos_vs_inactivos(void) {
     }
 
     /* Esperar que el admin 1 clasifique los 3 pacientes */
-    for (int intento = 0; intento < 200 && admins_test[0].pacientes_clasificados < 3; intento++) {
+    for (int intento = 0; intento < 200 && obtener_clasificados_admin(&admins_test[0]) < 3; intento++) {
         usleep(5000);
     }
 
     /* Solo el admin con indice 0 debio haber clasificado; los demas quedaron en espera */
-    CHECK(admins_test[0].pacientes_clasificados == 3);
-    CHECK(admins_test[1].pacientes_clasificados == 0);
-    CHECK(admins_test[2].pacientes_clasificados == 0);
-    CHECK(admins_test[3].pacientes_clasificados == 0);
+    CHECK(obtener_clasificados_admin(&admins_test[0]) == 3);
+    CHECK(obtener_clasificados_admin(&admins_test[1]) == 0);
+    CHECK(obtener_clasificados_admin(&admins_test[2]) == 0);
+    CHECK(obtener_clasificados_admin(&admins_test[3]) == 0);
 
     /* Reactivar admin 2 subiendo activos a 2 y encolar 2 pacientes mas */
     actualizar_admin_activos(2);
@@ -258,21 +265,23 @@ static void test_admin_hilos_activos_vs_inactivos(void) {
         enqueue(&cola_recepcion, p);
     }
 
-    for (int intento = 0; intento < 200 && (admins_test[0].pacientes_clasificados + admins_test[1].pacientes_clasificados) < 5; intento++) {
+    for (int intento = 0; intento < 200 && (obtener_clasificados_admin(&admins_test[0]) + obtener_clasificados_admin(&admins_test[1])) < 5; intento++) {
         usleep(5000);
     }
 
     /* Los admins 3 y 4 (indices 2 y 3) siguen inactivos */
-    CHECK(admins_test[0].pacientes_clasificados + admins_test[1].pacientes_clasificados == 5);
-    CHECK(admins_test[2].pacientes_clasificados == 0);
-    CHECK(admins_test[3].pacientes_clasificados == 0);
+    CHECK(obtener_clasificados_admin(&admins_test[0]) + obtener_clasificados_admin(&admins_test[1]) == 5);
+    CHECK(obtener_clasificados_admin(&admins_test[2]) == 0);
+    CHECK(obtener_clasificados_admin(&admins_test[3]) == 0);
 
     /* Terminar hilos */
-    simulacion_activa = 0;
+    pthread_mutex_lock(&cola_recepcion.mutex);
     pthread_mutex_lock(&admin_mutex);
+    simulacion_activa = 0;
     pthread_cond_broadcast(&admin_cond);
     pthread_mutex_unlock(&admin_mutex);
     pthread_cond_broadcast(&cola_recepcion.cond);
+    pthread_mutex_unlock(&cola_recepcion.mutex);
 
     for (int i = 0; i < MAX_ADMIN; i++) {
         pthread_join(admins_test[i].thread, NULL);
@@ -280,6 +289,68 @@ static void test_admin_hilos_activos_vs_inactivos(void) {
 
     SPEED_FACTOR = 1;
     actualizar_admin_activos(2);
+}
+
+static Cola cola_concurrente;
+static void *productor_stats(void *arg) {
+    (void)arg;
+    for (int i = 0; i < 100; i++) {
+        enqueue(&cola_concurrente, paciente(i + 1, 1));
+        pthread_mutex_lock(&stats_mutex);
+        total_pacientes_generados++;
+        pthread_mutex_unlock(&stats_mutex);
+        usleep(100);
+    }
+    return NULL;
+}
+
+static void *consumidor_stats(void *arg) {
+    (void)arg;
+    for (int i = 0; i < 100; i++) {
+        Paciente p = dequeue(&cola_concurrente);
+        if (p.id > 0) {
+            pthread_mutex_lock(&stats_mutex);
+            total_pacientes_atendidos++;
+            pthread_mutex_unlock(&stats_mutex);
+        }
+        usleep(100);
+    }
+    return NULL;
+}
+
+static void test_cola_tamano_y_estadisticas_snapshot(void) {
+    init_cola(&cola_concurrente);
+    simulacion_activa = 1;
+    pthread_mutex_lock(&stats_mutex);
+    total_pacientes_generados = 0;
+    total_pacientes_atendidos = 0;
+    total_pacientes_clasificados = 0;
+    total_pacientes_abandonaron = 0;
+    total_no_contabilizados = 0;
+    pthread_mutex_unlock(&stats_mutex);
+
+    pthread_t t_prod, t_cons;
+    pthread_create(&t_prod, NULL, productor_stats, NULL);
+    pthread_create(&t_cons, NULL, consumidor_stats, NULL);
+
+    /* Realizar lecturas concurrentes de cola_tamano y obtener_estadisticas */
+    for (int i = 0; i < 50; i++) {
+        int sz = cola_tamano(&cola_concurrente);
+        CHECK(sz >= 0 && sz <= MAX_PACIENTES);
+
+        EstadisticasSnapshot snap = obtener_estadisticas();
+        CHECK(snap.generados >= 0 && snap.generados <= 100);
+        CHECK(snap.atendidos >= 0 && snap.atendidos <= 100);
+        usleep(200);
+    }
+
+    pthread_join(t_prod, NULL);
+    pthread_join(t_cons, NULL);
+
+    CHECK(cola_tamano(&cola_concurrente) == 0);
+    EstadisticasSnapshot snap_final = obtener_estadisticas();
+    CHECK(snap_final.generados == 100);
+    CHECK(snap_final.atendidos == 100);
 }
 
 int main(void) {
@@ -295,6 +366,7 @@ int main(void) {
     test_admin_debe_trabajar();
     test_calcular_nuevos_admin_activos();
     test_admin_hilos_activos_vs_inactivos();
+    test_cola_tamano_y_estadisticas_snapshot();
 
     printf("\n%d comprobaciones, %d fallos\n", pruebas, fallos);
     return fallos == 0 ? 0 : 1;
