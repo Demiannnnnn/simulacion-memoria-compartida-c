@@ -293,7 +293,7 @@ void* personal_administrativo(void* arg) {
         printf("📋 Admin %d clasificando paciente %d\n", admin->id, paciente.id);
         pthread_mutex_unlock(&print_mutex);
         
-        // Tiempo de clasificación: 2-5 minutos (120-300 segundos)
+        // Tiempo de clasificación: 1-3 minutos (60-180 segundos)
         int tiempo_clasificacion = rand() % 121 + 60; // 60-180 segundos (1-3 min)
         dormir_simulacion(tiempo_clasificacion);
         
@@ -379,7 +379,7 @@ void* medico_atencion(void* arg) {
         printf("🩺 %s %d atendiendo paciente %d\n", tipo_str, medico->id, paciente.id);
         pthread_mutex_unlock(&print_mutex);
         
-        // Tiempo de atención: 12-18 minutos (720-1080 segundos)
+        // Tiempo de atención: 8-12 minutos (480-720 segundos)
         int tiempo_atencion = rand() % 241 + 480; // 480-720 segundos (8-12 min)
         dormir_simulacion(tiempo_atencion);
         
@@ -398,7 +398,7 @@ void* medico_atencion(void* arg) {
         
         medico->ocupado = 0;
         
-        // Pausa entre pacientes: 2-3 minutos (120-180 segundos)
+        // Pausa entre pacientes: 1-2 minutos (60-120 segundos)
         int tiempo_pausa = rand() % 61 + 60; // 60-120 segundos (1-2 min)
         dormir_simulacion(tiempo_pausa);
     }
@@ -416,7 +416,7 @@ void* gestor_personal(void* arg) {
         if (!simulacion_activa) break;
         
         time_t ahora = time(NULL);
-        if (ahora - ultimo_cambio_personal < 120 / SPEED_FACTOR) continue; // Mín 2 min reales entre cambios
+        if (ahora - ultimo_cambio_personal < 120 / SPEED_FACTOR) continue; // Mín 2 min de simulación (120/SPEED_FACTOR s reales) entre cambios
         
         // Evaluar carga del sistema para cambiar personal administrativo
         int carga_recepcion = cola_recepcion.count;
