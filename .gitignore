@@ -1,3 +1,5 @@
 main
 tests/test_main
+*.o
+reporte_diario.txt
 .DS_Store
