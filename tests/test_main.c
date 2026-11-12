@@ -175,6 +175,113 @@ static void test_generar_reporte(void) {
     rmdir(dir);
 }
 
+static void test_admin_debe_trabajar(void) {
+    /* Con 2 activos, solo indices 0 y 1 deben trabajar */
+    CHECK(admin_debe_trabajar(0, 2) == 1);
+    CHECK(admin_debe_trabajar(1, 2) == 1);
+    CHECK(admin_debe_trabajar(2, 2) == 0);
+    CHECK(admin_debe_trabajar(3, 2) == 0);
+
+    /* Con 1 activo, solo indice 0 trabaja */
+    CHECK(admin_debe_trabajar(0, 1) == 1);
+    CHECK(admin_debe_trabajar(1, 1) == 0);
+    CHECK(admin_debe_trabajar(2, 1) == 0);
+
+    /* Con 4 activos, todos trabajan */
+    for (int i = 0; i < MAX_ADMIN; i++) {
+        CHECK(admin_debe_trabajar(i, 4) == 1);
+    }
+
+    /* Indice invalido no trabaja */
+    CHECK(admin_debe_trabajar(-1, 2) == 0);
+}
+
+static void test_calcular_nuevos_admin_activos(void) {
+    /* Alta carga (> 15) aumenta personal hasta maximo MAX_ADMIN (4) */
+    CHECK(calcular_nuevos_admin_activos(16, 2) == 3);
+    CHECK(calcular_nuevos_admin_activos(20, 3) == 4);
+    CHECK(calcular_nuevos_admin_activos(30, 4) == 4);
+
+    /* Baja carga (< 5) reduce personal hasta minimo 1 */
+    CHECK(calcular_nuevos_admin_activos(4, 4) == 3);
+    CHECK(calcular_nuevos_admin_activos(2, 2) == 1);
+    CHECK(calcular_nuevos_admin_activos(0, 1) == 1);
+
+    /* Carga intermedia (5 a 15) mantiene el personal */
+    CHECK(calcular_nuevos_admin_activos(5, 2) == 2);
+    CHECK(calcular_nuevos_admin_activos(10, 3) == 3);
+    CHECK(calcular_nuevos_admin_activos(15, 2) == 2);
+}
+
+static void test_admin_hilos_activos_vs_inactivos(void) {
+    init_cola(&cola_recepcion);
+    init_cola(&cola_medico_general);
+    init_cola(&cola_enfermeria);
+    for (int i = 0; i < 4; i++) init_cola(&cola_especialista[i]);
+
+    actualizar_admin_activos(1);
+    simulacion_activa = 1;
+    SPEED_FACTOR = 10000;
+
+    PersonalAdmin admins_test[MAX_ADMIN];
+    for (int i = 0; i < MAX_ADMIN; i++) {
+        admins_test[i].id = i + 1;
+        admins_test[i].ocupado = 0;
+        admins_test[i].pacientes_clasificados = 0;
+        admins_test[i].activo = (i < 1) ? 1 : 0;
+        pthread_create(&admins_test[i].thread, NULL, personal_administrativo, &admins_test[i]);
+    }
+
+    /* Enviar 3 pacientes a recepcion */
+    for (int i = 1; i <= 3; i++) {
+        Paciente p = paciente(i, 1);
+        p.tipo_atencion = ATENCION_GENERAL;
+        enqueue(&cola_recepcion, p);
+    }
+
+    /* Esperar que el admin 1 clasifique los 3 pacientes */
+    for (int intento = 0; intento < 200 && admins_test[0].pacientes_clasificados < 3; intento++) {
+        usleep(5000);
+    }
+
+    /* Solo el admin con indice 0 debio haber clasificado; los demas quedaron en espera */
+    CHECK(admins_test[0].pacientes_clasificados == 3);
+    CHECK(admins_test[1].pacientes_clasificados == 0);
+    CHECK(admins_test[2].pacientes_clasificados == 0);
+    CHECK(admins_test[3].pacientes_clasificados == 0);
+
+    /* Reactivar admin 2 subiendo activos a 2 y encolar 2 pacientes mas */
+    actualizar_admin_activos(2);
+    for (int i = 4; i <= 5; i++) {
+        Paciente p = paciente(i, 1);
+        p.tipo_atencion = ATENCION_GENERAL;
+        enqueue(&cola_recepcion, p);
+    }
+
+    for (int intento = 0; intento < 200 && (admins_test[0].pacientes_clasificados + admins_test[1].pacientes_clasificados) < 5; intento++) {
+        usleep(5000);
+    }
+
+    /* Los admins 3 y 4 (indices 2 y 3) siguen inactivos */
+    CHECK(admins_test[0].pacientes_clasificados + admins_test[1].pacientes_clasificados == 5);
+    CHECK(admins_test[2].pacientes_clasificados == 0);
+    CHECK(admins_test[3].pacientes_clasificados == 0);
+
+    /* Terminar hilos */
+    simulacion_activa = 0;
+    pthread_mutex_lock(&admin_mutex);
+    pthread_cond_broadcast(&admin_cond);
+    pthread_mutex_unlock(&admin_mutex);
+    pthread_cond_broadcast(&cola_recepcion.cond);
+
+    for (int i = 0; i < MAX_ADMIN; i++) {
+        pthread_join(admins_test[i].thread, NULL);
+    }
+
+    SPEED_FACTOR = 1;
+    actualizar_admin_activos(2);
+}
+
 int main(void) {
     test_fifo();
     test_cola_llena_descarta();
@@ -185,6 +292,9 @@ int main(void) {
     test_verificar_abandono();
     test_dormir_simulacion_acelerada();
     test_generar_reporte();
+    test_admin_debe_trabajar();
+    test_calcular_nuevos_admin_activos();
+    test_admin_hilos_activos_vs_inactivos();
 
     printf("\n%d comprobaciones, %d fallos\n", pruebas, fallos);
     return fallos == 0 ? 0 : 1;

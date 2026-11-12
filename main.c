@@ -90,6 +90,42 @@ int num_especialistas = 2;
 // Variables para cambio dinámico de personal
 int admin_activos = 2;
 time_t ultimo_cambio_personal = 0;
+pthread_mutex_t admin_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t admin_cond = PTHREAD_COND_INITIALIZER;
+
+// Decide si un hilo administrativo con determinado índice (0 a MAX_ADMIN-1) debe trabajar
+int admin_debe_trabajar(int indice_admin, int activos) {
+    if (indice_admin < 0) return 0;
+    return indice_admin < activos;
+}
+
+// Calcula el nuevo número de administrativos activos según la carga de recepción
+int calcular_nuevos_admin_activos(int carga_recepcion, int activos_actuales) {
+    if (carga_recepcion > 15 && activos_actuales < MAX_ADMIN) {
+        return (activos_actuales < 3) ? activos_actuales + 1 : MAX_ADMIN;
+    } else if (carga_recepcion < 5 && activos_actuales > 1) {
+        return activos_actuales - 1;
+    }
+    return activos_actuales;
+}
+
+// Obtener valor actual de admin_activos bajo mutex
+int obtener_admin_activos(void) {
+    pthread_mutex_lock(&admin_mutex);
+    int activos = admin_activos;
+    pthread_mutex_unlock(&admin_mutex);
+    return activos;
+}
+
+// Actualizar admin_activos y notificar a los hilos en espera bajo mutex
+void actualizar_admin_activos(int nuevos_activos) {
+    pthread_mutex_lock(&admin_mutex);
+    if (nuevos_activos != admin_activos) {
+        admin_activos = nuevos_activos;
+        pthread_cond_broadcast(&admin_cond);
+    }
+    pthread_mutex_unlock(&admin_mutex);
+}
 
 // Estadísticas
 int total_pacientes_generados = 0;
@@ -281,13 +317,29 @@ void* generador_pacientes(void* arg) {
 // Hilo del personal administrativo
 void* personal_administrativo(void* arg) {
     PersonalAdmin* admin = (PersonalAdmin*)arg;
+    int indice = admin->id - 1;
     srand(time(NULL) + (unsigned long)pthread_self() + admin->id);
     
     while (simulacion_activa) {
+        pthread_mutex_lock(&admin_mutex);
+        while (simulacion_activa && !admin_debe_trabajar(indice, admin_activos)) {
+            admin->activo = 0;
+            admin->ocupado = 0;
+            pthread_cond_wait(&admin_cond, &admin_mutex);
+        }
+        if (!simulacion_activa) {
+            pthread_mutex_unlock(&admin_mutex);
+            break;
+        }
+        admin->activo = 1;
+        pthread_mutex_unlock(&admin_mutex);
+
         Paciente paciente = dequeue(&cola_recepcion);
         if (paciente.id == 0) continue;
         
+        pthread_mutex_lock(&admin_mutex);
         admin->ocupado = 1;
+        pthread_mutex_unlock(&admin_mutex);
         
         pthread_mutex_lock(&print_mutex);
         printf("📋 Admin %d clasificando paciente %d\n", admin->id, paciente.id);
@@ -301,7 +353,10 @@ void* personal_administrativo(void* arg) {
         
         paciente.tiempo_clasificacion = time(NULL);
         paciente.clasificado = 1;
+
+        pthread_mutex_lock(&admin_mutex);
         admin->pacientes_clasificados++;
+        pthread_mutex_unlock(&admin_mutex);
         
         pthread_mutex_lock(&stats_mutex);
         total_pacientes_clasificados++;
@@ -327,7 +382,9 @@ void* personal_administrativo(void* arg) {
                (paciente.tipo_atencion == ATENCION_ENFERMERIA) ? "Enfermería" : "Especialista");
         pthread_mutex_unlock(&print_mutex);
         
+        pthread_mutex_lock(&admin_mutex);
         admin->ocupado = 0;
+        pthread_mutex_unlock(&admin_mutex);
     }
     
     return NULL;
@@ -420,30 +477,31 @@ void* gestor_personal(void* arg) {
         
         // Evaluar carga del sistema para cambiar personal administrativo
         int carga_recepcion = cola_recepcion.count;
-        int nuevo_admin_activos = admin_activos;
         
-        if (carga_recepcion > 15 && admin_activos < 4) {
+        pthread_mutex_lock(&admin_mutex);
+        int activos_previos = admin_activos;
+        int nuevo_admin_activos = calcular_nuevos_admin_activos(carga_recepcion, activos_previos);
+        
+        if (nuevo_admin_activos != activos_previos) {
+            admin_activos = nuevo_admin_activos;
+            ultimo_cambio_personal = ahora;
+            pthread_cond_broadcast(&admin_cond);
+        }
+        pthread_mutex_unlock(&admin_mutex);
+        
+        if (nuevo_admin_activos > activos_previos) {
             // Alta carga: activar más personal
-            nuevo_admin_activos = (admin_activos < 3) ? admin_activos + 1 : 4;
-            
             pthread_mutex_lock(&print_mutex);
             printf("🚨 ALTA DEMANDA: Activando Admin %d (Total activos: %d)\n", 
                    nuevo_admin_activos, nuevo_admin_activos);
             pthread_mutex_unlock(&print_mutex);
             
-        } else if (carga_recepcion < 5 && admin_activos > 1) {
+        } else if (nuevo_admin_activos < activos_previos) {
             // Baja carga: reducir personal
-            nuevo_admin_activos = admin_activos - 1;
-            
             pthread_mutex_lock(&print_mutex);
             printf("📉 Baja demanda: Desactivando Admin %d (Total activos: %d)\n", 
-                   admin_activos, nuevo_admin_activos);
+                   activos_previos, nuevo_admin_activos);
             pthread_mutex_unlock(&print_mutex);
-        }
-        
-        if (nuevo_admin_activos != admin_activos) {
-            admin_activos = nuevo_admin_activos;
-            ultimo_cambio_personal = ahora;
         }
         
         // Detectar colapso del sistema
@@ -519,10 +577,14 @@ void* monitor_sistema(void* arg) {
                total_pacientes_generados, total_pacientes_clasificados, 
                total_pacientes_atendidos, total_pacientes_abandonaron);
         
-        printf("Personal administrativo activos: %d/%d - ", admin_activos, num_admin);
+        int activos_mon = obtener_admin_activos();
+        printf("Personal administrativo activos: %d/%d - ", activos_mon, num_admin);
         for (int i = 0; i < num_admin; i++) {
-            if (i < admin_activos) {
-                printf("%s%d", (i > 0) ? ", " : "", personal_admin[i].ocupado);
+            if (i < activos_mon) {
+                pthread_mutex_lock(&admin_mutex);
+                int oc = personal_admin[i].ocupado;
+                pthread_mutex_unlock(&admin_mutex);
+                printf("%s%d", (i > 0) ? ", " : "", oc);
             } else {
                 printf("%s0", (i > 0) ? ", " : ""); // Inactivo
             }
@@ -587,11 +649,15 @@ void generar_reporte() {
         fprintf(archivo, "- Eficiencia del sistema: %.2f%%\n\n", eficiencia);
     }
     
+    int activos_rep = obtener_admin_activos();
     fprintf(archivo, "PERSONAL ADMINISTRATIVO:\n");
     for (int i = 0; i < MAX_ADMIN; i++) {
+        pthread_mutex_lock(&admin_mutex);
+        int clasificados = personal_admin[i].pacientes_clasificados;
+        pthread_mutex_unlock(&admin_mutex);
         fprintf(archivo, "- Admin %d: %d pacientes clasificados %s\n", 
-                personal_admin[i].id, personal_admin[i].pacientes_clasificados,
-                (i < admin_activos) ? "(activo)" : "(inactivo al final)");
+                personal_admin[i].id, clasificados,
+                (i < activos_rep) ? "(activo)" : "(inactivo al final)");
     }
     
     fprintf(archivo, "\nPERSONAL MÉDICO:\n");
@@ -635,9 +701,10 @@ int main(int argc, char* argv[]) {
         else if (strcmp(argv[1], "x1") == 0) SPEED_FACTOR = 1;
     }
     
+    int activos_ini = obtener_admin_activos();
     printf("🏥 Iniciando simulación de colas de atención médica (Velocidad: x%d)\n", SPEED_FACTOR);
     printf("Configuración: %d admins (activos: %d), %d médicos generales, %d enfermeras, %d especialistas\n", 
-           num_admin, admin_activos, num_medicos_general, num_enfermeras, num_especialistas);
+           num_admin, activos_ini, num_medicos_general, num_enfermeras, num_especialistas);
     printf("Presiona Ctrl+C para terminar la simulación\n\n");
     
     // Configurar manejador de señal
@@ -660,7 +727,7 @@ int main(int argc, char* argv[]) {
         personal_admin[i].id = i + 1;
         personal_admin[i].ocupado = 0;
         personal_admin[i].pacientes_clasificados = 0;
-        personal_admin[i].activo = 1;
+        personal_admin[i].activo = (i < activos_ini) ? 1 : 0;
         pthread_create(&personal_admin[i].thread, NULL, personal_administrativo, &personal_admin[i]);
     }
     
@@ -716,6 +783,10 @@ int main(int argc, char* argv[]) {
     simulacion_activa = 0;
     
     // Despertar todos los hilos esperando
+    pthread_mutex_lock(&admin_mutex);
+    pthread_cond_broadcast(&admin_cond);
+    pthread_mutex_unlock(&admin_mutex);
+
     pthread_cond_broadcast(&cola_recepcion.cond);
     pthread_cond_broadcast(&cola_medico_general.cond);
     pthread_cond_broadcast(&cola_enfermeria.cond);
