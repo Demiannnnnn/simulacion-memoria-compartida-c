@@ -77,12 +77,12 @@ typedef struct {
 Cola cola_recepcion;
 Cola cola_medico_general;
 Cola cola_enfermeria;
-Cola cola_especialista[4];
+Cola cola_especialista[MAX_ESPECIALISTAS];
 
 PersonalAdmin personal_admin[MAX_ADMIN];
 Medico medicos[MAX_MEDICOS];
 
-int num_admin = 4; // Cambiado de 2 a 4
+int num_admin = 4;
 int num_medicos_general = 4;
 int num_enfermeras = 2;
 int num_especialistas = 2;
@@ -293,8 +293,8 @@ void* personal_administrativo(void* arg) {
         printf("📋 Admin %d clasificando paciente %d\n", admin->id, paciente.id);
         pthread_mutex_unlock(&print_mutex);
         
-        // Tiempo de clasificación: 2-5 minutos (120-300 segundos)
-        int tiempo_clasificacion = rand() % 121 + 60; // 60-180 segundos (1-3 min)
+        // Tiempo de clasificación: 1-3 minutos (60-180 segundos)
+        int tiempo_clasificacion = rand() % 121 + 60;
         dormir_simulacion(tiempo_clasificacion);
         
         if (!simulacion_activa) break;
@@ -379,8 +379,8 @@ void* medico_atencion(void* arg) {
         printf("🩺 %s %d atendiendo paciente %d\n", tipo_str, medico->id, paciente.id);
         pthread_mutex_unlock(&print_mutex);
         
-        // Tiempo de atención: 12-18 minutos (720-1080 segundos)
-        int tiempo_atencion = rand() % 241 + 480; // 480-720 segundos (8-12 min)
+        // Tiempo de atención: 8-12 minutos (480-720 segundos)
+        int tiempo_atencion = rand() % 241 + 480;
         dormir_simulacion(tiempo_atencion);
         
         if (!simulacion_activa) break;
@@ -398,8 +398,8 @@ void* medico_atencion(void* arg) {
         
         medico->ocupado = 0;
         
-        // Pausa entre pacientes: 2-3 minutos (120-180 segundos)
-        int tiempo_pausa = rand() % 61 + 60; // 60-120 segundos (1-2 min)
+        // Pausa entre pacientes: 1-2 minutos (60-120 segundos)
+        int tiempo_pausa = rand() % 61 + 60;
         dormir_simulacion(tiempo_pausa);
     }
     
@@ -544,7 +544,7 @@ void* monitor_sistema(void* arg) {
 }
 
 // Función para generar reporte final
-void generar_reporte() {
+void generar_reporte(void) {
     FILE* archivo = fopen("reporte_diario.txt", "w");
     if (!archivo) {
         printf("Error al crear archivo de reporte\n");
